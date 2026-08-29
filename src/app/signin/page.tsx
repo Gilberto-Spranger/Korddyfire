@@ -15,10 +15,6 @@ import Loadingconnection from "@/loadingpages/loadingconnection";
 import type { AxiosError } from "axios";
 import type { User } from "@/types/types";
 
-// -----------------------------------------------------------------------------
-// TYPES & INTERFACES
-// -----------------------------------------------------------------------------
-
 interface AuthSuccessResponse {
   token: string;
   message: string;
@@ -38,23 +34,16 @@ type FormData = {
 
 type Provider = "google" | "facebook" | "github" | "imlinkey";
 
-// -----------------------------------------------------------------------------
-// SUPABASE CLIENT & COOKIES HELPERS
-// -----------------------------------------------------------------------------
+const supabaseUrl = process.env.NEXT_PUBLIC_SUPABASE_URL!;
+const supabasePublishableKey = process.env.NEXT_PUBLIC_SUPABASE_PUBLISHABLE_KEY!;
 
-const supabaseUrl = process.env.NEXT_PUBLIC_SUPABASE_URL;
-const supabasePublishableKey = process.env.NEXT_PUBLIC_SUPABASE_PUBLISHABLE_KEY;
-
-const supabase =
-  supabaseUrl && supabasePublishableKey
-    ? createClient(supabaseUrl, supabasePublishableKey, {
-        auth: {
-          persistSession: true,
-          autoRefreshToken: true,
-          detectSessionInUrl: true,
-        },
-      })
-    : null;
+const supabase = createClient(supabaseUrl, supabasePublishableKey, {
+  auth: {
+    persistSession: true,
+    autoRefreshToken: true,
+    detectSessionInUrl: true,
+  },
+});
 
 const setCookie = (name: string, value: string, hours = 24) => {
   const expires = new Date();
@@ -66,54 +55,15 @@ const setCookie = (name: string, value: string, hours = 24) => {
     `;path=/;Secure;SameSite=None`;
 };
 
-// Helper para persistir dados de usuário vindos do Supabase
-const storeSupabaseUserData = (session: Session) => {
-  const supabaseUser = session.user;
-
-  localStorage.setItem("supabase_session", JSON.stringify(session));
-  localStorage.setItem(
-    "auth_user",
-    JSON.stringify({
-      id: supabaseUser.id,
-      email: supabaseUser.email,
-      username:
-        supabaseUser.user_metadata?.username ||
-        supabaseUser.user_metadata?.preferred_username ||
-        supabaseUser.email?.split("@")[0] ||
-        "",
-      first_name: supabaseUser.user_metadata?.first_name || "",
-      last_name: supabaseUser.user_metadata?.last_name || "",
-      profile_picture:
-        supabaseUser.user_metadata?.avatar_url ||
-        supabaseUser.user_metadata?.picture ||
-        "",
-    })
-  );
-
-  if (session.access_token) {
-    setCookie("supabase_access_token", session.access_token, 24);
-  }
-};
-
-// -----------------------------------------------------------------------------
-// COMPONENTE PRINCIPAL
-// -----------------------------------------------------------------------------
-
 export default function Signin() {
   const router = useRouter();
 
-  // Estados Form / Geral
   const [formData, setFormData] = useState<FormData>({ email: "", password: "" });
   const [error, setError] = useState<string | null>(null);
   const [isOnline, setIsOnline] = useState(true);
 
-  // Estados de Carregamento Separados
   const [loadingEmail, setLoadingEmail] = useState(false);
   const [loadingProvider, setLoadingProvider] = useState<Provider | null>(null);
-
-  // ---------------------------------------------------------------------------
-  // EFETOS: Conectividade
-  // ---------------------------------------------------------------------------
 
   useEffect(() => {
     const updateOnlineStatus = () => setIsOnline(navigator.onLine);
@@ -128,14 +78,56 @@ export default function Signin() {
     };
   }, []);
 
-  // ---------------------------------------------------------------------------
-  // EFETOS: Escuta Callbacks e Sessão OAuth do Supabase
-  // ---------------------------------------------------------------------------
+  // Envia a payload formatada do Supabase para o controller `signinProviders` no backend
+  const syncUserWithBackend = async (session: Session) => {
+    const supabaseUser = session.user;
+
+    const payload = {
+      id: supabaseUser.id,
+      email: supabaseUser.email,
+      raw_app_meta_data: {
+        provider: supabaseUser.app_metadata?.provider,
+        providers: supabaseUser.app_metadata?.providers || [],
+      },
+      raw_user_meta_data: {
+        iss: supabaseUser.user_metadata?.iss,
+        sub: supabaseUser.user_metadata?.sub,
+        name: supabaseUser.user_metadata?.name,
+        full_name: supabaseUser.user_metadata?.full_name,
+        user_name: supabaseUser.user_metadata?.user_name,
+        nickname: supabaseUser.user_metadata?.nickname,
+        preferred_username: supabaseUser.user_metadata?.preferred_username,
+        email: supabaseUser.email,
+        avatar: supabaseUser.user_metadata?.avatar_url || supabaseUser.user_metadata?.picture,
+        provider_id: supabaseUser.user_metadata?.provider_id || supabaseUser.id,
+        email_verified: supabaseUser.user_metadata?.email_verified ?? false,
+        phone_verified: supabaseUser.user_metadata?.phone_verified ?? false,
+        slug: supabaseUser.user_metadata?.slug,
+      },
+    };
+
+    try {
+      const { data } = await api.post<AuthSuccessResponse>("/auth/signin-providers", payload);
+
+      setCookie("auth_token", data.token, 24);
+      if (data.user) {
+        localStorage.setItem("auth_user", JSON.stringify(data.user));
+      }
+
+      router.replace("/home");
+    } catch (err) {
+      const axiosErr = err as AxiosError<BackendErrorResponse>;
+      const msg =
+        axiosErr.response?.data?.error ||
+        axiosErr.response?.data?.detail ||
+        axiosErr.response?.data?.message ||
+        "Falha ao registrar sessão OAuth no backend.";
+      setError(msg);
+      setLoadingProvider(null);
+    }
+  };
 
   useEffect(() => {
-    if (!supabase) return;
-
-    // Processa retornos via URL / Hash do OAuth
     const handleOAuthCallback = async () => {
       const url = new URL(window.location.href);
       const oauthError = url.searchParams.get("error");
@@ -150,8 +142,7 @@ export default function Signin() {
       try {
         const { data: { session } } = await supabase.auth.getSession();
         if (session?.user) {
-          storeSupabaseUserData(session);
-          router.replace("/home");
+          await syncUserWithBackend(session);
         }
       } catch (err) {
         console.error("Erro ao processar sessão OAuth:", err);
@@ -161,11 +152,9 @@ export default function Signin() {
 
     handleOAuthCallback();
 
-    // Listener para mudanças de estado de autenticação (redirecionamentos)
     const { data: { subscription } } = supabase.auth.onAuthStateChange((event, session) => {
       if (event === "SIGNED_IN" && session?.user) {
-        storeSupabaseUserData(session);
-        router.replace("/home");
+        syncUserWithBackend(session);
       }
     });
 
@@ -173,10 +162,6 @@ export default function Signin() {
       subscription.unsubscribe();
     };
   }, [router]);
-
-  // ---------------------------------------------------------------------------
-  // LÓGICA 1: Autenticação por E-mail e Senha (SignIn Nativo)
-  // ---------------------------------------------------------------------------
 
   const handleInputChange = (e: React.ChangeEvent<HTMLInputElement>) => {
     setFormData((prev) => ({
@@ -193,7 +178,7 @@ export default function Signin() {
     try {
       const { data } = await api.post<AuthSuccessResponse>("/auth/signin", formData);
 
-      setCookie("auth_token", data.token, 2);
+      setCookie("auth_token", data.token, 24);
 
       if (data.user) {
         localStorage.setItem("auth_user", JSON.stringify(data.user));
@@ -214,65 +199,29 @@ export default function Signin() {
     }
   };
 
-  // ---------------------------------------------------------------------------
-  // LÓGICA 2: Autenticação OAuth (Subdivido em Supabase & Backend Custom)
-  // ---------------------------------------------------------------------------
-
-  const handleImlinkeyOAuth = async () => {
-    if (!supabase) {
-      setError("Supabase não está configurado no frontend.");
-      setLoadingProvider(null);
-      return;
-    }
+  const handleOAuthTrigger = async (provider: Provider) => {
+    setError(null);
+    setLoadingProvider(provider);
 
     try {
       const redirectTo = `${window.location.origin}/signin`;
+      const targetProvider = provider === "imlinkey" ? "custom:korddyfire" : provider;
+
       const { error: oauthError } = await supabase.auth.signInWithOAuth({
-        provider: "custom:korddyfire",
+        provider: targetProvider as any,
         options: {
           redirectTo,
-          scopes: "openid profile email phone birthdate age avatar",
+          scopes: provider === "imlinkey" ? "openid profile email phone birthdate age avatar" : undefined,
         },
       });
 
       if (oauthError) throw oauthError;
     } catch (err) {
       const authError = err as AuthError;
-      console.error("Imlinkey OAuth error:", authError);
-      setError(authError?.message || "Não foi possível iniciar o login com Imlinkey.");
+      setError(authError?.message || `Não foi possível iniciar o login com ${provider}.`);
       setLoadingProvider(null);
     }
   };
-
-  const handleStandardOAuth = async (provider: Exclude<Provider, "imlinkey">) => {
-    try {
-      const res = await api.get<{ redirect_url?: string }>(`/auth/signin-${provider}/`);
-
-      if (res.data?.redirect_url) {
-        window.location.href = res.data.redirect_url;
-      } else {
-        throw new Error("Resposta inválida do servidor. URL de redirecionamento não encontrada.");
-      }
-    } catch (err) {
-      setError(err instanceof Error ? err.message : "Erro ao iniciar OAuth.");
-      setLoadingProvider(null);
-    }
-  };
-
-  const handleOAuthTrigger = (provider: Provider) => {
-    setError(null);
-    setLoadingProvider(provider);
-
-    if (provider === "imlinkey") {
-      handleImlinkeyOAuth();
-    } else {
-      handleStandardOAuth(provider);
-    }
-  };
-
-  // ---------------------------------------------------------------------------
-  // RENDERIZAÇÃO
-  // ---------------------------------------------------------------------------
 
   if (!isOnline) {
     return <Loadingconnection />;
@@ -280,12 +229,10 @@ export default function Signin() {
 
   return (
     <div className="flex w-full h-screen bg-gray-100">
-      {/* Background Image */}
       <div className="hidden md:flex md:w-1/2 h-full">
         <BackgroundImage />
       </div>
 
-      {/* Container de Formulário */}
       <div className="w-full md:w-1/2 flex items-center justify-center bg-gray-950 p-6">
         <motion.div
           initial={{ x: "-100%", opacity: 0 }}
@@ -295,7 +242,6 @@ export default function Signin() {
         >
           <h2 className="text-2xl font-bold mb-6 text-center text-white">Sign In</h2>
 
-          {/* SEÇÃO 1: FORMULÁRIO DE LOGIN (EMAIL / SENHA) */}
           <form className="w-full" onSubmit={handleEmailPasswordSignIn} noValidate>
             <Input
               type="email"
@@ -341,14 +287,12 @@ export default function Signin() {
             </div>
           </form>
 
-          {/* MENSAVEM DE ERRO GLOBAL */}
           {error && (
             <p role="alert" className="text-red-500 text-sm mt-2 text-center">
               {error}
             </p>
           )}
 
-          {/* LINK DE REGISTRO */}
           <p className="text-center text-gray-400 text-sm mt-6">
             Não tem uma conta?
             <Link href="/signup" className="text-blue-400 hover:text-blue-600 ml-2">
@@ -356,54 +300,45 @@ export default function Signin() {
             </Link>
           </p>
 
-          {/* SEÇÃO 2: AUTENTICAÇÃO OAUTH */}
           <div className="flex flex-col items-center mt-4 mb-10">
             <p className="text-gray-600 text-sm mb-2">Ou entre com</p>
 
             <div className="flex space-x-6">
-              {/* Google */}
               <button
                 type="button"
                 onClick={() => handleOAuthTrigger("google")}
                 title="Entrar com Google"
                 disabled={loadingEmail || loadingProvider !== null}
-                aria-busy={loadingProvider === "google"}
                 className="focus:outline-none hover:scale-110 transition-transform disabled:opacity-50"
               >
                 <FcGoogle size={30} />
               </button>
 
-              {/* Facebook */}
               <button
                 type="button"
                 onClick={() => handleOAuthTrigger("facebook")}
                 title="Entrar com Facebook"
                 disabled={loadingEmail || loadingProvider !== null}
-                aria-busy={loadingProvider === "facebook"}
                 className="focus:outline-none hover:scale-110 transition-transform disabled:opacity-50"
               >
                 <FaFacebook size={30} className="text-blue-600" />
               </button>
 
-              {/* GitHub */}
               <button
                 type="button"
                 onClick={() => handleOAuthTrigger("github")}
                 title="Entrar com GitHub"
                 disabled={loadingEmail || loadingProvider !== null}
-                aria-busy={loadingProvider === "github"}
                 className="focus:outline-none hover:scale-110 transition-transform disabled:opacity-50"
               >
                 <FaGithub size={30} className="text-white" />
               </button>
 
-              {/* Imlinkey (Supabase Custom Provider) */}
               <button
                 type="button"
                 onClick={() => handleOAuthTrigger("imlinkey")}
                 title="Entrar com Imlinkey"
                 disabled={loadingEmail || loadingProvider !== null}
-                aria-busy={loadingProvider === "imlinkey"}
                 className="relative w-7 h-7 rounded-full overflow-hidden flex items-center justify-center bg-gray-800 hover:bg-gray-700 focus:outline-none hover:scale-110 transition-transform disabled:opacity-50"
               >
                 <Image
@@ -417,7 +352,6 @@ export default function Signin() {
             </div>
           </div>
 
-          {/* SEÇÃO 3: LINKS EXTERNOS KORDDY */}
           <div className="mt-6 text-center space-y-3 w-full">
             <p className="text-gray-400 text-sm">From Korddy</p>
 
