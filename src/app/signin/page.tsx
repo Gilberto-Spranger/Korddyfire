@@ -7,7 +7,7 @@ import Link from "next/link";
 import Image from "next/image";
 import { FcGoogle } from "react-icons/fc";
 import { FaFacebook, FaGithub, FaLock } from "react-icons/fa";
-import { createClient, type AuthError } from "@supabase/supabase-js";
+import { createClient, type AuthError, type Session } from "@supabase/supabase-js";
 import api from "@/utils/api";
 import Input from "@/components/ui/input";
 import BackgroundImage from "@/components/backgroundimage";
@@ -15,9 +15,9 @@ import Loadingconnection from "@/loadingpages/loadingconnection";
 import type { AxiosError } from "axios";
 import type { User } from "@/types/types";
 
-// ------------------
-// Interfaces & Types
-// ------------------
+// -----------------------------------------------------------------------------
+// TYPES & INTERFACES
+// -----------------------------------------------------------------------------
 
 interface AuthSuccessResponse {
   token: string;
@@ -36,51 +36,29 @@ type FormData = {
   password: string;
 };
 
-type Provider =
-  | "google"
-  | "facebook"
-  | "github"
-  | "imlinkey";
+type Provider = "google" | "facebook" | "github" | "imlinkey";
 
-// ------------------
-// Supabase
-// ------------------
+// -----------------------------------------------------------------------------
+// SUPABASE CLIENT & COOKIES HELPERS
+// -----------------------------------------------------------------------------
 
-const supabaseUrl =
-  process.env.NEXT_PUBLIC_SUPABASE_URL;
-
-const supabasePublishableKey =
-  process.env.NEXT_PUBLIC_SUPABASE_PUBLISHABLE_KEY;
+const supabaseUrl = process.env.NEXT_PUBLIC_SUPABASE_URL;
+const supabasePublishableKey = process.env.NEXT_PUBLIC_SUPABASE_PUBLISHABLE_KEY;
 
 const supabase =
   supabaseUrl && supabasePublishableKey
-    ? createClient(
-        supabaseUrl,
-        supabasePublishableKey,
-        {
-          auth: {
-            persistSession: true,
-            autoRefreshToken: true,
-            detectSessionInUrl: true,
-          },
-        }
-      )
+    ? createClient(supabaseUrl, supabasePublishableKey, {
+        auth: {
+          persistSession: true,
+          autoRefreshToken: true,
+          detectSessionInUrl: true,
+        },
+      })
     : null;
 
-// ------------------
-// Helpers
-// ------------------
-
-const setCookie = (
-  name: string,
-  value: string,
-  hours = 24
-) => {
+const setCookie = (name: string, value: string, hours = 24) => {
   const expires = new Date();
-
-  expires.setTime(
-    expires.getTime() + hours * 60 * 60 * 1000
-  );
+  expires.setTime(expires.getTime() + hours * 60 * 60 * 1000);
 
   document.cookie =
     `${name}=${encodeURIComponent(value)}` +
@@ -88,275 +66,147 @@ const setCookie = (
     `;path=/;Secure;SameSite=None`;
 };
 
-// ------------------
-// Component
-// ------------------
+// Helper para persistir dados de usuário vindos do Supabase
+const storeSupabaseUserData = (session: Session) => {
+  const supabaseUser = session.user;
+
+  localStorage.setItem("supabase_session", JSON.stringify(session));
+  localStorage.setItem(
+    "auth_user",
+    JSON.stringify({
+      id: supabaseUser.id,
+      email: supabaseUser.email,
+      username:
+        supabaseUser.user_metadata?.username ||
+        supabaseUser.user_metadata?.preferred_username ||
+        supabaseUser.email?.split("@")[0] ||
+        "",
+      first_name: supabaseUser.user_metadata?.first_name || "",
+      last_name: supabaseUser.user_metadata?.last_name || "",
+      profile_picture:
+        supabaseUser.user_metadata?.avatar_url ||
+        supabaseUser.user_metadata?.picture ||
+        "",
+    })
+  );
+
+  if (session.access_token) {
+    setCookie("supabase_access_token", session.access_token, 24);
+  }
+};
+
+// -----------------------------------------------------------------------------
+// COMPONENTE PRINCIPAL
+// -----------------------------------------------------------------------------
 
 export default function Signin() {
   const router = useRouter();
 
-  const [formData, setFormData] =
-    useState<FormData>({
-      email: "",
-      password: "",
-    });
+  // Estados Form / Geral
+  const [formData, setFormData] = useState<FormData>({ email: "", password: "" });
+  const [error, setError] = useState<string | null>(null);
+  const [isOnline, setIsOnline] = useState(true);
 
-  const [loadingEmail, setLoadingEmail] =
-    useState(false);
+  // Estados de Carregamento Separados
+  const [loadingEmail, setLoadingEmail] = useState(false);
+  const [loadingProvider, setLoadingProvider] = useState<Provider | null>(null);
 
-  const [loadingProvider, setLoadingProvider] =
-    useState<Provider | null>(null);
-
-  const [error, setError] =
-    useState<string | null>(null);
-
-  const [isOnline, setIsOnline] =
-    useState(true);
-
-  // ------------------
-  // Online / Offline
-  // ------------------
+  // ---------------------------------------------------------------------------
+  // EFETOS: Conectividade
+  // ---------------------------------------------------------------------------
 
   useEffect(() => {
-    const updateOnlineStatus = () => {
-      setIsOnline(navigator.onLine);
-    };
-
+    const updateOnlineStatus = () => setIsOnline(navigator.onLine);
     updateOnlineStatus();
 
-    window.addEventListener(
-      "online",
-      updateOnlineStatus
-    );
-
-    window.addEventListener(
-      "offline",
-      updateOnlineStatus
-    );
+    window.addEventListener("online", updateOnlineStatus);
+    window.addEventListener("offline", updateOnlineStatus);
 
     return () => {
-      window.removeEventListener(
-        "online",
-        updateOnlineStatus
-      );
-
-      window.removeEventListener(
-        "offline",
-        updateOnlineStatus
-      );
+      window.removeEventListener("online", updateOnlineStatus);
+      window.removeEventListener("offline", updateOnlineStatus);
     };
   }, []);
 
-  // ------------------
-  // Handle OAuth callback
-  // ------------------
+  // ---------------------------------------------------------------------------
+  // EFETOS: Escuta Callbacks e Sessão OAuth do Supabase
+  // ---------------------------------------------------------------------------
 
   useEffect(() => {
     if (!supabase) return;
 
-    const handleOAuthSession = async () => {
+    // Processa retornos via URL / Hash do OAuth
+    const handleOAuthCallback = async () => {
       const url = new URL(window.location.href);
-
-      const oauthError =
-        url.searchParams.get("error");
-
-      const oauthErrorDescription =
-        url.searchParams.get(
-          "error_description"
-        );
+      const oauthError = url.searchParams.get("error");
+      const oauthErrorDescription = url.searchParams.get("error_description");
 
       if (oauthError) {
-        setError(
-          oauthErrorDescription ||
-            oauthError ||
-            "Falha na autenticação OAuth."
-        );
-
+        setError(oauthErrorDescription || oauthError || "Falha na autenticação OAuth.");
         setLoadingProvider(null);
         return;
       }
 
       try {
-        const {
-          data: { session },
-        } = await supabase.auth.getSession();
-
-        if (!session?.user) return;
-
-        const supabaseUser = session.user;
-
-        // Guarda a sessão Supabase
-        localStorage.setItem(
-          "supabase_session",
-          JSON.stringify(session)
-        );
-
-        // Guarda o usuário
-        localStorage.setItem(
-          "auth_user",
-          JSON.stringify({
-            id: supabaseUser.id,
-            email: supabaseUser.email,
-            username:
-              supabaseUser.user_metadata?.username ||
-              supabaseUser.user_metadata?.preferred_username ||
-              supabaseUser.email?.split("@")[0] ||
-              "",
-            first_name:
-              supabaseUser.user_metadata?.first_name ||
-              "",
-            last_name:
-              supabaseUser.user_metadata?.last_name ||
-              "",
-            profile_picture:
-              supabaseUser.user_metadata?.avatar_url ||
-              supabaseUser.user_metadata?.picture ||
-              "",
-          })
-        );
-
-        // Token Supabase
-        if (session.access_token) {
-          setCookie(
-            "supabase_access_token",
-            session.access_token,
-            24
-          );
+        const { data: { session } } = await supabase.auth.getSession();
+        if (session?.user) {
+          storeSupabaseUserData(session);
+          router.replace("/home");
         }
-
-        // Redireciona
-        router.replace("/home");
       } catch (err) {
-        console.error(
-          "Erro ao processar sessão OAuth:",
-          err
-        );
-
-        setError(
-          "Não foi possível concluir a autenticação."
-        );
+        console.error("Erro ao processar sessão OAuth:", err);
+        setError("Não foi possível concluir a autenticação.");
       }
     };
 
-    handleOAuthSession();
+    handleOAuthCallback();
 
-    const {
-      data: { subscription },
-    } = supabase.auth.onAuthStateChange(
-      async (event, session) => {
-        if (
-          event === "SIGNED_IN" &&
-          session?.user
-        ) {
-          localStorage.setItem(
-            "supabase_session",
-            JSON.stringify(session)
-          );
-
-          localStorage.setItem(
-            "auth_user",
-            JSON.stringify({
-              id: session.user.id,
-              email: session.user.email,
-              username:
-                session.user.user_metadata
-                  ?.username ||
-                session.user.email?.split("@")[0] ||
-                "",
-              first_name:
-                session.user.user_metadata
-                  ?.first_name ||
-                "",
-              last_name:
-                session.user.user_metadata
-                  ?.last_name ||
-                "",
-              profile_picture:
-                session.user.user_metadata
-                  ?.avatar_url ||
-                session.user.user_metadata
-                  ?.picture ||
-                "",
-            })
-          );
-
-          if (session.access_token) {
-            setCookie(
-              "supabase_access_token",
-              session.access_token,
-              24
-            );
-          }
-
-          router.replace("/home");
-        }
+    // Listener para mudanças de estado de autenticação (redirecionamentos)
+    const { data: { subscription } } = supabase.auth.onAuthStateChange((event, session) => {
+      if (event === "SIGNED_IN" && session?.user) {
+        storeSupabaseUserData(session);
+        router.replace("/home");
       }
-    );
+    });
 
     return () => {
       subscription.unsubscribe();
     };
   }, [router]);
 
-  // ------------------
-  // Inputs
-  // ------------------
+  // ---------------------------------------------------------------------------
+  // LÓGICA 1: Autenticação por E-mail e Senha (SignIn Nativo)
+  // ---------------------------------------------------------------------------
 
-  const handleChange = (
-    e: React.ChangeEvent<HTMLInputElement>
-  ) => {
-    setFormData((previous) => ({
-      ...previous,
+  const handleInputChange = (e: React.ChangeEvent<HTMLInputElement>) => {
+    setFormData((prev) => ({
+      ...prev,
       [e.target.name]: e.target.value,
     }));
   };
 
-  // ------------------
-  // Email / Password
-  // ------------------
-
-  const handleSignIn = async (
-    e: React.FormEvent
-  ) => {
+  const handleEmailPasswordSignIn = async (e: React.FormEvent) => {
     e.preventDefault();
-
     setError(null);
     setLoadingEmail(true);
 
     try {
-      const { data } =
-        await api.post<AuthSuccessResponse>(
-          "/auth/signin",
-          formData
-        );
+      const { data } = await api.post<AuthSuccessResponse>("/auth/signin", formData);
 
-      setCookie(
-        "auth_token",
-        data.token,
-        2
-      );
+      setCookie("auth_token", data.token, 2);
 
       if (data.user) {
-        localStorage.setItem(
-          "auth_user",
-          JSON.stringify(data.user)
-        );
+        localStorage.setItem("auth_user", JSON.stringify(data.user));
       }
 
       router.replace("/home");
     } catch (err) {
-      const axiosErr =
-        err as AxiosError<BackendErrorResponse>;
-
+      const axiosErr = err as AxiosError<BackendErrorResponse>;
       const msg =
         axiosErr.response?.data?.error ||
         axiosErr.response?.data?.detail ||
         axiosErr.response?.data?.message ||
-        `Erro ao fazer login: ${
-          err instanceof Error
-            ? err.message
-            : "Erro desconhecido"
-        }`;
+        `Erro ao fazer login: ${err instanceof Error ? err.message : "Erro desconhecido"}`;
 
       setError(msg);
     } finally {
@@ -364,150 +214,94 @@ export default function Signin() {
     }
   };
 
-  // ------------------
-  // OAuth
-  // ------------------
+  // ---------------------------------------------------------------------------
+  // LÓGICA 2: Autenticação OAuth (Subdivido em Supabase & Backend Custom)
+  // ---------------------------------------------------------------------------
 
-  const handleOAuthLogin = async (
-    provider: Provider
-  ) => {
-    setError(null);
-    setLoadingProvider(provider);
-
-    // --------------------------------
-    // IMLINKEY → SUPABASE CUSTOM OIDC
-    // --------------------------------
-
-    if (provider === "imlinkey") {
-      if (!supabase) {
-        setError(
-          "Supabase não está configurado no frontend."
-        );
-
-        setLoadingProvider(null);
-        return;
-      }
-
-      try {
-        const redirectTo =
-          `${window.location.origin}/signin`;
-
-        const { error: oauthError } =
-          await supabase.auth.signInWithOAuth({
-            provider: "custom:korddyfire",
-            options: {
-              redirectTo,
-              scopes:
-                "openid profile email phone birthdate age avatar",
-            },
-          });
-
-        if (oauthError) {
-          throw oauthError;
-        }
-
-        return;
-      } catch (err) {
-        const authError =
-          err as AuthError;
-
-        console.error(
-          "Imlinkey OAuth error:",
-          authError
-        );
-
-        setError(
-          authError?.message ||
-            "Não foi possível iniciar o login com Imlinkey."
-        );
-
-        setLoadingProvider(null);
-        return;
-      }
+  const handleImlinkeyOAuth = async () => {
+    if (!supabase) {
+      setError("Supabase não está configurado no frontend.");
+      setLoadingProvider(null);
+      return;
     }
 
-    // --------------------------------
-    // GOOGLE / FACEBOOK / GITHUB
-    // Mantém teu backend atual
-    // --------------------------------
-
     try {
-      const res =
-        await api.get<{
-          redirect_url?: string;
-        }>(
-          `/auth/signin-${provider}/`
-        );
+      const redirectTo = `${window.location.origin}/signin`;
+      const { error: oauthError } = await supabase.auth.signInWithOAuth({
+        provider: "custom:korddyfire",
+        options: {
+          redirectTo,
+          scopes: "openid profile email phone birthdate age avatar",
+        },
+      });
 
-      if (res.data?.redirect_url) {
-        window.location.href =
-          res.data.redirect_url;
-      } else {
-        throw new Error(
-          "Resposta inválida do servidor. URL de redirecionamento não encontrada."
-        );
-      }
+      if (oauthError) throw oauthError;
     } catch (err) {
-      setError(
-        err instanceof Error
-          ? err.message
-          : "Erro ao iniciar OAuth."
-      );
-
+      const authError = err as AuthError;
+      console.error("Imlinkey OAuth error:", authError);
+      setError(authError?.message || "Não foi possível iniciar o login com Imlinkey.");
       setLoadingProvider(null);
     }
   };
 
-  // ------------------
-  // Offline
-  // ------------------
+  const handleStandardOAuth = async (provider: Exclude<Provider, "imlinkey">) => {
+    try {
+      const res = await api.get<{ redirect_url?: string }>(`/auth/signin-${provider}/`);
+
+      if (res.data?.redirect_url) {
+        window.location.href = res.data.redirect_url;
+      } else {
+        throw new Error("Resposta inválida do servidor. URL de redirecionamento não encontrada.");
+      }
+    } catch (err) {
+      setError(err instanceof Error ? err.message : "Erro ao iniciar OAuth.");
+      setLoadingProvider(null);
+    }
+  };
+
+  const handleOAuthTrigger = (provider: Provider) => {
+    setError(null);
+    setLoadingProvider(provider);
+
+    if (provider === "imlinkey") {
+      handleImlinkeyOAuth();
+    } else {
+      handleStandardOAuth(provider);
+    }
+  };
+
+  // ---------------------------------------------------------------------------
+  // RENDERIZAÇÃO
+  // ---------------------------------------------------------------------------
 
   if (!isOnline) {
     return <Loadingconnection />;
   }
 
-  // ------------------
-  // UI
-  // ------------------
-
   return (
     <div className="flex w-full h-screen bg-gray-100">
-      {/* Background */}
+      {/* Background Image */}
       <div className="hidden md:flex md:w-1/2 h-full">
         <BackgroundImage />
       </div>
 
-      {/* Login */}
+      {/* Container de Formulário */}
       <div className="w-full md:w-1/2 flex items-center justify-center bg-gray-950 p-6">
         <motion.div
-          initial={{
-            x: "-100%",
-            opacity: 0,
-          }}
-          animate={{
-            x: "0%",
-            opacity: 1,
-          }}
-          transition={{
-            duration: 0.45,
-          }}
+          initial={{ x: "-100%", opacity: 0 }}
+          animate={{ x: "0%", opacity: 1 }}
+          transition={{ duration: 0.45 }}
           className="w-full max-w-md flex flex-col justify-center items-center bg-gray-950 p-6 md:p-8 rounded-lg shadow-lg"
         >
-          <h2 className="text-2xl font-bold mb-6 text-center text-white">
-            Sign In
-          </h2>
+          <h2 className="text-2xl font-bold mb-6 text-center text-white">Sign In</h2>
 
-          {/* Email / Password */}
-          <form
-            className="w-full"
-            onSubmit={handleSignIn}
-            noValidate
-          >
+          {/* SEÇÃO 1: FORMULÁRIO DE LOGIN (EMAIL / SENHA) */}
+          <form className="w-full" onSubmit={handleEmailPasswordSignIn} noValidate>
             <Input
               type="email"
               name="email"
               value={formData.email}
-              onChange={handleChange}
+              onChange={handleInputChange}
               placeholder="Digite seu email"
               className="w-full mb-3"
               required
@@ -517,7 +311,7 @@ export default function Signin() {
               type="password"
               name="password"
               value={formData.password}
-              onChange={handleChange}
+              onChange={handleInputChange}
               placeholder="Digite sua senha"
               eye
               icon={<FaLock />}
@@ -528,7 +322,6 @@ export default function Signin() {
             <div className="flex flex-col space-y-4 mt-4">
               <p className="text-white text-xs text-right">
                 Esqueceu a senha?
-
                 <Link
                   href="/user/recover_password"
                   className="text-blue-400 hover:text-blue-600 ml-2"
@@ -539,62 +332,42 @@ export default function Signin() {
 
               <button
                 type="submit"
-                disabled={
-                  loadingEmail ||
-                  !!loadingProvider
-                }
+                disabled={loadingEmail || !!loadingProvider}
                 className="bg-blue-600 hover:bg-blue-700 text-white font-bold py-3 w-full rounded focus:outline-none focus:ring-2 transition-all disabled:opacity-50 disabled:cursor-not-allowed"
                 aria-busy={loadingEmail}
               >
-                {loadingEmail
-                  ? "Carregando..."
-                  : "Entrar"}
+                {loadingEmail ? "Carregando..." : "Entrar"}
               </button>
             </div>
           </form>
 
+          {/* MENSAVEM DE ERRO GLOBAL */}
           {error && (
-            <p
-              role="alert"
-              className="text-red-500 text-sm mt-2 text-center"
-            >
+            <p role="alert" className="text-red-500 text-sm mt-2 text-center">
               {error}
             </p>
           )}
 
-          {/* Sign up */}
+          {/* LINK DE REGISTRO */}
           <p className="text-center text-gray-400 text-sm mt-6">
             Não tem uma conta?
-
-            <Link
-              href="/signup"
-              className="text-blue-400 hover:text-blue-600 ml-2"
-            >
+            <Link href="/signup" className="text-blue-400 hover:text-blue-600 ml-2">
               Criar conta
             </Link>
           </p>
 
-          {/* OAuth */}
+          {/* SEÇÃO 2: AUTENTICAÇÃO OAUTH */}
           <div className="flex flex-col items-center mt-4 mb-10">
-            <p className="text-gray-600 text-sm mb-2">
-              Ou entre com
-            </p>
+            <p className="text-gray-600 text-sm mb-2">Ou entre com</p>
 
             <div className="flex space-x-6">
               {/* Google */}
               <button
                 type="button"
-                onClick={() =>
-                  handleOAuthLogin("google")
-                }
+                onClick={() => handleOAuthTrigger("google")}
                 title="Entrar com Google"
-                disabled={
-                  loadingEmail ||
-                  loadingProvider !== null
-                }
-                aria-busy={
-                  loadingProvider === "google"
-                }
+                disabled={loadingEmail || loadingProvider !== null}
+                aria-busy={loadingProvider === "google"}
                 className="focus:outline-none hover:scale-110 transition-transform disabled:opacity-50"
               >
                 <FcGoogle size={30} />
@@ -603,62 +376,35 @@ export default function Signin() {
               {/* Facebook */}
               <button
                 type="button"
-                onClick={() =>
-                  handleOAuthLogin("facebook")
-                }
+                onClick={() => handleOAuthTrigger("facebook")}
                 title="Entrar com Facebook"
-                disabled={
-                  loadingEmail ||
-                  loadingProvider !== null
-                }
-                aria-busy={
-                  loadingProvider === "facebook"
-                }
+                disabled={loadingEmail || loadingProvider !== null}
+                aria-busy={loadingProvider === "facebook"}
                 className="focus:outline-none hover:scale-110 transition-transform disabled:opacity-50"
               >
-                <FaFacebook
-                  size={30}
-                  className="text-blue-600"
-                />
+                <FaFacebook size={30} className="text-blue-600" />
               </button>
 
-              {/* Github */}
+              {/* GitHub */}
               <button
                 type="button"
-                onClick={() =>
-                  handleOAuthLogin("github")
-                }
+                onClick={() => handleOAuthTrigger("github")}
                 title="Entrar com GitHub"
-                disabled={
-                  loadingEmail ||
-                  loadingProvider !== null
-                }
-                aria-busy={
-                  loadingProvider === "github"
-                }
+                disabled={loadingEmail || loadingProvider !== null}
+                aria-busy={loadingProvider === "github"}
                 className="focus:outline-none hover:scale-110 transition-transform disabled:opacity-50"
               >
-                <FaGithub
-                  size={30}
-                  className="text-white"
-                />
+                <FaGithub size={30} className="text-white" />
               </button>
 
-              {/* Imlinkey */}
+              {/* Imlinkey (Supabase Custom Provider) */}
               <button
                 type="button"
-                onClick={() =>
-                  handleOAuthLogin("imlinkey")
-                }
-                className="relative w-7 h-7 rounded-full overflow-hidden flex items-center justify-center bg-gray-800 hover:bg-gray-700 focus:outline-none hover:scale-110 transition-transform disabled:opacity-50"
+                onClick={() => handleOAuthTrigger("imlinkey")}
                 title="Entrar com Imlinkey"
-                disabled={
-                  loadingEmail ||
-                  loadingProvider !== null
-                }
-                aria-busy={
-                  loadingProvider === "imlinkey"
-                }
+                disabled={loadingEmail || loadingProvider !== null}
+                aria-busy={loadingProvider === "imlinkey"}
+                className="relative w-7 h-7 rounded-full overflow-hidden flex items-center justify-center bg-gray-800 hover:bg-gray-700 focus:outline-none hover:scale-110 transition-transform disabled:opacity-50"
               >
                 <Image
                   src="https://imlinkey.store/favicon.png"
@@ -671,22 +417,15 @@ export default function Signin() {
             </div>
           </div>
 
-          {/* From Korddy */}
+          {/* SEÇÃO 3: LINKS EXTERNOS KORDDY */}
           <div className="mt-6 text-center space-y-3 w-full">
-            <p className="text-gray-400 text-sm">
-              From Korddy
-            </p>
+            <p className="text-gray-400 text-sm">From Korddy</p>
 
             <div className="flex justify-center gap-3 flex-wrap">
-              {/* Korddy Fire */}
               <button
                 type="button"
                 onClick={() =>
-                  window.open(
-                    "https://korddyfire.imlinkey.store",
-                    "_blank",
-                    "noopener,noreferrer"
-                  )
+                  window.open("https://korddyfire.imlinkey.store", "_blank", "noopener,noreferrer")
                 }
                 className="flex items-center justify-center w-12 h-12 rounded-xl border border-gray-300 hover:bg-gray-100 transition shadow-sm bg-white"
               >
@@ -699,15 +438,10 @@ export default function Signin() {
                 />
               </button>
 
-              {/* Imlinkey */}
               <button
                 type="button"
                 onClick={() =>
-                  window.open(
-                    "https://imlinkey.store",
-                    "_blank",
-                    "noopener,noreferrer"
-                  )
+                  window.open("https://imlinkey.store", "_blank", "noopener,noreferrer")
                 }
                 className="flex items-center justify-center w-12 h-12 rounded-xl border border-gray-300 hover:bg-gray-100 transition shadow-sm bg-white"
               >
