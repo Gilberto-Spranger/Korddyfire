@@ -1,0 +1,13 @@
+@import "tailwindcss";
+
+
+/* Scrollbar removida */
+.scrollbar-none::-webkit-scrollbar,
+::-webkit-scrollbar {
+  display: none;
+}
+
+.scrollbar-none {
+  -ms-overflow-style: none; /* Internet Explorer e Edge */
+  scrollbar-width: none;    /* Firefox */
+}
